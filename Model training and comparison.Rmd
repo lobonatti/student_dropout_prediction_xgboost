@@ -1,0 +1,1474 @@
+---
+title: "Thesis code (2/2): model training and comparison"
+author: "bonatti lorenzo"
+date: "2024-10-30"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Fits and compares CART, Bagging, Random Forest and XGBoost to classify students as Dropout / Enrolled / Graduate (thesis Chapter 7).
+Requires `data/prepared_data.rds`, created by `01_data_preparation.Rmd`.
+
+Load the required libraries.
+
+```{r}
+library(caTools)
+library(dplyr)
+library(corrplot)
+library(nnet)
+library(pheatmap)
+library(xgboost)
+library(gbm)
+library(caret)
+library(cvms)
+library(randomForest)
+library(tree)
+```
+
+Load the prepared data (full dataset and train / validation / test sets).
+
+```{r}
+prepared <- readRDS("data/prepared_data.rds")
+data_new   <- prepared$data_new
+train      <- prepared$train
+validation <- prepared$validation
+test       <- prepared$test
+```
+
+# CART (baseline)
+
+Fit a classification tree (Gini criterion).
+
+```{r}
+tree <- tree(train$Target ~. ,data= train ,method = 'gini')
+summary(tree)
+```
+
+Plot the full tree.
+
+```{r}
+plot(tree,col='darkgray',lwd=2)
+text(tree,pretty=0,col='blue',cex=0.6)
+```
+
+## Tree pruning
+
+Cross-validation (misclassification error) to choose the tree size.
+
+```{r}
+tree
+
+cv.diabetes <- cv.tree(tree, FUN=prune.misclass)
+
+names(cv.diabetes)
+cv.diabetes
+```
+
+Prune the tree to the best size found (7 terminal nodes).
+
+```{r}
+prune.diabetes <- prune.tree(tree,best=7, method = "misclass")
+prune.diabetes
+```
+
+Predict on the test set and compute the confusion matrix.
+
+```{r}
+tree_pred = predict(prune.diabetes, test, type = "class")
+confusion_matrix_tree= confusionMatrix(data=tree_pred,test$Target)
+print(confusion_matrix_tree)
+```
+
+Plot the normalized confusion matrix (percentages by actual class).
+
+```{r}
+confusion_tree_df <- as.data.frame(as.table(confusion_matrix_tree))
+colnames(confusion_tree_df) <- c("Predicted", "Reference", "Count")
+
+# Sum for the actual labels
+sums <- tapply(confusion_tree_df$Count, confusion_tree_df$Reference, sum)
+
+# Percentages
+confusion_tree_df$Percentage <- confusion_tree_df$Count / sums[confusion_tree_df$Reference] * 100
+
+ggplot(confusion_tree_df, aes(x = Reference, y = Predicted, fill = Percentage)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = paste0(round(Percentage, 1), "%")), size = 3) +
+  scale_fill_gradient(low = "white", high = "purple") +
+  theme_minimal() +
+  labs(x = "Actual", y = "Predicted", title = "Normalized Confusion Matrix")
+
+```
+
+# Bagging
+
+Bagging = random forest with `mtry` equal to the number of predictors (27).
+
+```{r}
+set.seed(1234)
+bag = randomForest(Target ~ ., data = train, mtry = 27, importance = TRUE,
+                            ntree = 1000, type="classification")
+bag
+```
+
+## Bagging predictions
+
+```{r}
+predictions_bag = predict(bag, newdata = test)
+confusion_matrix_bag= confusionMatrix(data=predictions_bag, test$Target)
+print(confusion_matrix_bag)
+```
+
+Normalized confusion matrix.
+
+```{r}
+cfbag_df <- as.data.frame(as.table(confusion_matrix_bag))
+colnames(cfbag_df) <- c("Predicted", "Reference", "Count")
+
+# Sum for the actual labels
+sums <- tapply(cfbag_df$Count, cfbag_df$Reference, sum)
+
+# Percentages
+cfbag_df$Percentage <- cfbag_df$Count / sums[cfbag_df$Reference] * 100
+
+ggplot(cfbag_df, aes(x = Reference, y = Predicted, fill = Percentage)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = paste0(round(Percentage, 1), "%")), size = 3) +
+  scale_fill_gradient(low = "white", high = "darkorange") +
+  theme_minimal() +
+  labs(x = "Actual", y = "Predicted", title = "Normalized Confusion Matrix")
+
+```
+
+## Bagging variable importance
+
+Top 15 variables by Mean Decrease in Gini.
+
+```{r}
+varImpPlot(
+  bag,
+  main = "Top 15 Variable Importance (Bagging)",
+  n.var = 15,  # Display top 10 variables
+  pch= 16,
+  type = 2,  # Use Mean Decrease in Gini
+  col = "purple"  # Customize bar color to purple
+)
+
+```
+
+Print the top 3 variables.
+
+```{r}
+importance_values <- importance(bag)
+
+# Sort by Mean Decrease in Gini
+importance_gini <- importance_values[ , "MeanDecreaseGini"]
+importance_sorted <- sort(importance_gini, decreasing = TRUE)
+
+# Display the top 3 variables
+top_3_gini <- head(importance_sorted, 3)
+print(top_3_gini)
+
+# Optional: View the top 3 in a more readable format
+cat("Top 3 Variables by Mean Decrease in Gini:\n")
+for (var in names(top_3_gini)) {
+  cat(sprintf("%s: %.3f\n", var, top_3_gini[var]))
+}
+```
+
+# Random Forest
+
+Random forest with `mtry = 15` variables tried at each split (chosen from the OOB / CV error).
+
+```{r}
+set.seed(1234)
+rf.2 = randomForest(Target ~ . , data = train, mtry = 15, ntree = 1000, type = "classification")
+rf.2
+```
+
+## Random Forest predictions
+
+```{r}
+pred_rf = predict(rf.2, newdata = test)
+confusion_matrix_rf = confusionMatrix(data=pred_rf, test$Target)
+print(confusion_matrix_rf)
+```
+
+Normalized confusion matrix.
+
+```{r}
+cfrf_df <- as.data.frame(as.table(confusion_matrix_rf))
+colnames(cfrf_df) <- c("Predicted", "Reference", "Count")
+
+# Sum for the actual labels
+sums <- tapply(cfrf_df$Count, cfrf_df$Reference, sum)
+
+# Percentages
+cfrf_df$Percentage <- cfrf_df$Count / sums[cfrf_df$Reference] * 100
+
+ggplot(cfrf_df, aes(x = Reference, y = Predicted, fill = Percentage)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = paste0(round(Percentage, 1), "%")), size = 3) +
+  scale_fill_gradient(low = "white", high = "lightgreen") +
+  theme_minimal() +
+  labs(x = "Actual", y = "Predicted", title = "Normalized Confusion Matrix")
+
+```
+
+## Random Forest variable importance
+
+```{r}
+varImpPlot(
+  rf.2,
+  main = "Top 15 Variable Importance (Bagging)",
+  n.var = 10,  # Display top 10 variables
+  pch= 16,
+  type = 2,  # Use Mean Decrease in Gini
+  col = "purple"  # Customize bar color to purple
+)
+```
+
+# Gradient boosting with `gbm` (exploratory, not part of the final comparison)
+
+The chunks in this section are disabled (`eval=FALSE`): unfinished tests, not reported in the thesis.
+
+```{r, eval=FALSE}
+if (!require("gbm")) install.packages("gbm")
+library(gbm)
+```
+
+Train a multinomial gradient boosting model.
+
+```{r, eval=FALSE}
+# Ensure the target variable is a factor
+train$Target <- as.factor(train$Target)
+
+# Train the Gradient Boosting model
+gbm_model <- gbm(
+  formula = Target ~ ., 
+  data = train, 
+  distribution = "multinomial", 
+  n.trees = 1000, 
+  interaction.depth = 4, 
+  shrinkage = 0.01, 
+  cv.folds = 5
+)
+```
+
+Predict on the test set and compute the confusion matrix.
+
+```{r, eval=FALSE}
+
+length(predicted_classes)
+
+# Length of the target in the test set
+length(test$Target)
+# Predict class probabilities (if needed)
+pred <- predict(gbm_model, newdata = test, n.trees = gbm_model$n.trees, type = "response")
+
+# Convert probabilities to predicted class labels
+predicted_classes <- colnames(pred)[max.col(pred)]  # Select the class with the highest probability
+
+test$Target <- as.factor(test$Target)
+
+test <- test[1:nrow(pred), ]
+pred <- predict(gbm_model, newdata = test, n.trees = gbm_model$n.trees, type = "response")
+
+# Convert predictions to a factor with the same levels as the actual classes
+predicted_classes <- factor(predicted_classes, levels = levels(test$Target))
+
+library(caret)
+
+# Create the confusion matrix
+confusion_matrix <- confusionMatrix(data = predicted_classes, reference = test$Target)
+
+# Print the confusion matrix
+print(confusion_matrix)
+length(predicted_classes)
+length(test$Target)
+```
+
+```{r, eval=FALSE}
+# Print a summary of the model
+summary(gbm_model)
+```
+
+```{r, eval=FALSE}
+predictions <- predict(gbm_model, newdata = test, n.trees = gbm_model$n.trees)
+
+# Calculate RMSE
+rmse <- sqrt(mean((predictions - test_data$medv)^2))
+print(paste("RMSE:", round(rmse, 2)))
+```
+
+```{r, eval=FALSE}
+pred_boost = predict(boosting_model, newdata = test)
+confusion_matrix_rf = confusionMatrix(data=pred_boost, test$Target)
+print(confusion_matrix_rf)
+```
+
+```{r, eval=FALSE}
+pred_boost <- predict(boosting_model, newdata = test, n.trees = 3000, type = "response")
+
+# Convert probabilities to predicted classes (class with the highest probability)
+predicted_classes_boost <- colnames(pred_boost)[max.col(pred_boost)]
+
+# Convert predictions to a factor with levels matching the target
+predicted_classes_boost <- factor(predicted_classes_boost, levels = levels(test$Target))
+
+# Ensure the test$Target is also a factor
+test$Target <- as.factor(test$Target)
+
+# Load the caret library for confusion matrix calculation
+if (!require("caret")) install.packages("caret")
+library(caret)
+
+# Create the confusion matrix
+confusion_matrix_boost <- confusionMatrix(data = predicted_classes_boost, reference = test$Target)
+
+# Print the confusion matrix
+print(confusion_matrix_boost)
+```
+
+# XGBoost
+
+## Data for XGBoost
+
+Re-split the data into train (80%) and test (20%).
+The test set is the same as above (same seed); `train` here is the 80% that remains after removing the test set, so it also contains the validation rows.
+
+```{r}
+data_new$Target = as.factor(data_new$Target)
+
+n = nrow(data_new)
+
+set.seed(1234)
+
+# Test set (20% of the data)
+select_test = sample(1:n, n * 0.2)
+test = as.data.frame(data_new[select_test, ])
+
+# Training set (remaining 80%)
+train = as.data.frame(data_new[-select_test, ])
+
+cat("Training set dimensions: ", dim(train), "\n")
+cat("Test set dimensions: ", dim(test), "\n")
+```
+
+Check the class distribution, then build the numeric design matrices (dummy variables for the categorical predictors, target excluded) and the numeric labels (0, 1, 2) required by XGBoost.
+
+```{r}
+# Example: Split data into training and validation sets and test
+
+table(train$Target)
+table(test$Target)
+
+X_train <- model.matrix(~ . - 1, data = train[, -ncol(train)])  # Exclude the target column
+X_test <- model.matrix(~ . - 1, data = test[, - ncol(test)])    # Exclude the target column
+X_validation <- model.matrix(~ . - 1, data = validation[, - ncol(validation)])    # Exclude the target column
+# Step 2: Convert the target variable to numeric format
+y_train <- as.numeric(as.factor(train$Target)) - 1
+y_test <- as.numeric(as.factor(test$Target)) - 1
+y_validation <-  as.numeric(as.factor(validation$Target)) - 1
+```
+
+Class weights for the imbalanced classes: inverse of each class frequency in the training set.
+
+```{r}
+# Set scale_pos_weight based on the inverse frequency of each class
+dropout_weight <- nrow(train) / sum(train$Target == "Dropout")
+enrolled_weight <- nrow(train) / sum(train$Target == "Enrolled")
+graduate_weight <- nrow(train) / sum(train$Target == "Graduate")
+
+# Define a named vector for the scale_pos_weight to assign to each class
+scale_pos_weights <- c("Dropout" = dropout_weight, 
+                       "Enrolled" = enrolled_weight, 
+                       "Graduate" = graduate_weight)
+```
+
+Convert the matrices to XGBoost's `DMatrix` format.
+
+```{r}
+xgb_train <- xgb.DMatrix(data = X_train, label = y_train)
+xgb_test <- xgb.DMatrix(data = X_test, label = y_test)
+xgb_validation <- xgb.DMatrix(data = X_validation, label = y_validation)
+```
+
+## Hyperparameter tuning (stepwise strategy)
+
+Parameters are tuned one step at a time (one or two parameters per step) with 5-fold cross-validation on the training set, minimizing the multiclass log-loss. The best value found at each step is kept fixed in the following ones (approach of Islam et al., 2021; thesis Chapter 7.6.2).
+
+Starting point: the default XGBoost parameters.
+
+```{r}
+fixed_params <- list(
+  booster = "gbtree",             # Type of booster (gbtree or dart)
+  eta = 0.3,                      # Learning rate, default
+  max_depth = 6,                  # default
+  min_child_weight = 1,           # Minimum sum of weights in child nodes, default
+  gamma = 0,                      # Minimum loss reduction to split, default
+  max_delta_step = 0,             # DEFAULT
+  subsample = 1,                  # Subsample ratio of training examples, default
+  colsample_bytree = 1,           # Subsample ratio of columns, default
+  lambda = 1,                     # default
+  scale_pos_weight = c(dropout_weight, enrolled_weight, graduate_weight),                            
+  alpha = 0,                      # default
+  objective = "multi:softprob",   # Objective function for multi-class classification
+  eval_metric = "mlogloss",       # Evaluation metric
+  num_class = length(unique(y_train)) # Number of classes
+)
+```
+
+```{r, eval=FALSE}
+help("xgboost")
+```
+
+### Step 1: number of boosting rounds (`nrounds`)
+
+```{r}
+# Step 1: Tune `nrounds` (equivalent to `n_estimators`)
+set.seed(1234)
+param_grid_step1 <- expand.grid(nrounds = seq(1000, 20000, 3000))
+
+result_step1 <- function(param_grid, fixed_params, dtrain, nfold = 5, early_stopping_rounds = 20) {
+  best_logloss <- Inf
+  best_nrounds <- NULL
+  logloss_results <- data.frame(nrounds = integer(), logloss = numeric())  # Initialize the results data frame
+
+  for (i in 1:nrow(param_grid)) {
+    cat(sprintf("Iteration %d of %d: Testing nrounds = %d\n", i, nrow(param_grid), param_grid$nrounds[i]))
+    current_nrounds <- param_grid$nrounds[i]
+    
+    # Perform cross-validation
+    cv <- xgb.cv(
+      params = fixed_params,
+      data = dtrain,
+      nrounds = current_nrounds,
+      nfold = nfold,
+      early_stopping_rounds = early_stopping_rounds,
+      maximize = FALSE,
+      verbose = 0
+    )
+
+    # Extract the minimum logloss from the evaluation log
+    mean_logloss <- min(cv$evaluation_log$test_mlogloss_mean, na.rm = TRUE)  # Added `na.rm = TRUE` for safety
+    
+    # Append the results to logloss_results
+    logloss_results <- rbind(logloss_results, data.frame(nrounds = current_nrounds, logloss = mean_logloss))
+    
+    # Update the best parameters if a lower logloss is found
+    if (mean_logloss < best_logloss) {
+      best_logloss <- mean_logloss
+      best_nrounds <- current_nrounds
+      cat(sprintf("New best logloss found: %.4f (nrounds = %d)\n", best_logloss, best_nrounds))
+    }
+  }
+
+  # Return all results, including the logloss_results
+  list(best_nrounds = best_nrounds, best_logloss = best_logloss, logloss_results = logloss_results)
+}
+
+
+# Run the optimization for `nrounds`
+result_step1 <- result_step1(param_grid_step1, fixed_params, xgb_train)
+
+# Update the number of rounds in the fixed parameters
+cat(sprintf("\nBest number of rounds: %d, Logloss: %.4f\n", result_step1$best_nrounds, result_step1$best_logloss))
+nrounds <- result_step1$best_nrounds  # Needed in the following steps
+
+# Extract results for plotting
+logloss_results <- result_step1$logloss_results
+best_nrounds <- result_step1$best_nrounds
+best_logloss <- result_step1$best_logloss
+
+# Plot 
+ggplot(logloss_results, aes(x = nrounds, y = logloss)) +
+  geom_line(color = "blue", size = 1) +
+  geom_point(color = "blue", size = 1) +
+  geom_vline(xintercept = best_nrounds, color = "red", linetype = "dashed", size = 1) +
+  labs(
+    title = "Cross-Validation Logloss vs. nrounds",
+    x = "nrounds",
+    y = "Logloss"
+  ) +
+  theme_minimal() +
+  annotate("text", x = best_nrounds, y = min(logloss_results$logloss), 
+           label = paste("Best nrounds =", best_nrounds), 
+           vjust = -1, hjust = -0.1, color = "red", size = 3.5)
+logloss_results
+```
+
+### Step 2: tree complexity (`max_depth`, `min_child_weight`)
+
+```{r}
+# Step 2: Tune `max_depth` and `min_child_weight`
+set.seed(1234)
+param_grid_step2 <- expand.grid(max_depth = c(1, 4 , 8), min_child_weight = c(1, 3, 6))
+
+result_step2 <- function(param_grid, fixed_params, dtrain, nfold = 5, early_stopping_rounds = 10, nrounds) {
+  best_logloss <- Inf
+  best_params <- NULL
+  logloss_results <- data.frame(max_depth = integer(), 
+                                 min_child_weight = integer(), 
+                                 logloss = numeric())
+
+  for (i in 1:nrow(param_grid)) {
+    cat(sprintf("Iteration %d of %d: Testing max_depth = %d, min_child_weight = %d\n", 
+                i, nrow(param_grid), param_grid$max_depth[i], param_grid$min_child_weight[i]))
+    
+    current_params <- list(
+      max_depth = param_grid$max_depth[i],
+      min_child_weight = param_grid$min_child_weight[i]
+    )
+    
+    # Combine fixed params with the current grid search params
+    params <- c(fixed_params, current_params)
+    
+    # Perform cross-validation
+    cv <- xgb.cv(
+      params = params,
+      data = dtrain,
+      nrounds = nrounds,
+      nfold = nfold,
+      early_stopping_rounds = early_stopping_rounds,
+      maximize = FALSE,
+      verbose = 0
+    )
+    
+    mean_logloss <- min(cv$evaluation_log$test_mlogloss_mean)
+    logloss_results <- rbind(logloss_results, 
+                             data.frame(max_depth = current_params$max_depth, 
+                                        min_child_weight = current_params$min_child_weight, 
+                                        logloss = mean_logloss))
+    
+    if (mean_logloss < best_logloss) {
+      best_logloss <- mean_logloss
+      best_params <- current_params
+      cat(sprintf("New best logloss found: %.4f (max_depth = %d, min_child_weight = %d)\n", 
+                  best_logloss, best_params$max_depth, best_params$min_child_weight))
+    }
+  }
+  
+  list(best_params = best_params, best_logloss = best_logloss, logloss_results = logloss_results)
+}
+
+# Run the optimization for `max_depth` and `min_child_weight`
+result_step2 <- result_step2(param_grid_step2, fixed_params, xgb_train, nrounds = nrounds)
+
+# Extract results for plotting
+logloss_results <- result_step2$logloss_results
+best_params <- result_step2$best_params
+best_logloss <- result_step2$best_logloss
+
+# Update the parameters with the best found values
+cat(sprintf("\nBest parameters: max_depth = %d, min_child_weight = %d, Logloss: %.4f\n", 
+            best_params$max_depth, 
+            best_params$min_child_weight, 
+            best_logloss))
+
+fixed_params$max_depth <- best_params$max_depth
+fixed_params$min_child_weight <- best_params$min_child_weight
+```
+
+Plot log-loss for each (`max_depth`, `min_child_weight`) combination.
+
+```{r}
+logloss_results$param_combination <- paste0(logloss_results$max_depth, ".", logloss_results$min_child_weight)
+
+best_index <- which.min(logloss_results$logloss)
+best_combination <- logloss_results$param_combination[best_index]
+best_logloss <- logloss_results$logloss[best_index]
+
+ggplot(logloss_results, aes(x = param_combination, y = logloss, group = 1)) +
+  geom_line(color = "blue", size = 1) +  # Line plot for log-loss
+  geom_point(color = "blue", size = 3) +  # Add points to the line
+  geom_vline(xintercept = as.numeric(factor(best_combination, levels = logloss_results$param_combination)), 
+             color = "red", linetype = "dashed", size = 1) +  # Highlight best combination
+  annotate("text", 
+           x = as.numeric(factor(best_combination, levels = logloss_results$param_combination)), 
+           y = best_logloss, 
+           label = paste("Best:", best_combination), 
+           vjust = -1, hjust = -0.1, color = "red", size = 4) +  # Label for best combination
+  labs(
+    title = "Logloss vs. Parameter Combinations",
+    x = "Parameter Combinations (max_depth and min_child_weight)",
+    y = "Logloss"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Same plot, with the dashed line aligned to the best combination.
+
+```{r}
+best_index <- which.min(logloss_results$logloss)
+best_combination <- logloss_results$param_combination[best_index]
+best_logloss <- logloss_results$logloss[best_index]
+
+# Ensure the dashed line aligns with the best combination
+ggplot(logloss_results, aes(x = param_combination, y = logloss, group = 1)) +
+  geom_line(color = "blue", size = 1) +  # Line plot for log-loss
+  geom_point(color = "blue", size = 3) +  # Add points to the line
+  geom_vline(
+    xintercept = as.numeric(factor(logloss_results$param_combination))[best_index], 
+    color = "red", linetype = "dashed", size = 1
+  ) +  # Correct alignment with best combination
+  annotate("text", 
+           x = as.numeric(factor(logloss_results$param_combination))[best_index], 
+           y = best_logloss, 
+           label = paste("Best:", best_combination), 
+           vjust = -1, hjust = -0.1, color = "red", size = 4) +  # Correct label for best combination
+  labs(
+    title = "Logloss vs. Parameter Combinations",
+    x = "Parameter Combinations (max_depth ; min_child_weight)",
+    y = "Logloss"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+### Step 3: minimum loss reduction to split (`gamma`)
+
+Check the best parameters so far.
+
+```{r}
+fixed_params
+fixed_params[["eta"]] <- 0.3
+```
+
+```{r}
+# Step 3: Tune `gamma`
+set.seed(1234)
+param_grid_step3 <- expand.grid(gamma = c(0, 0.1, 0.25, 0.5, 0.75, 1, 1.5, 2, 3, 
+                                        4))
+
+result_step3 <- function(param_grid, fixed_params, dtrain, nfold = 5, early_stopping_rounds = 10, nrounds) {
+  best_logloss <- Inf
+  best_params <- NULL
+  logloss_results <- data.frame(gamma = numeric(), logloss = numeric())  # Initialize the results data frame
+
+  for (i in 1:nrow(param_grid)) {
+    cat(sprintf("Iteration %d of %d: Testing gamma = %.2f\n", i, nrow(param_grid), param_grid$gamma[i]))
+    
+    # Combine fixed params with the current grid search param
+    current_params <- list(
+      booster = fixed_params$booster,
+      eta = fixed_params$eta,
+      max_depth = fixed_params$max_depth,
+      min_child_weight = fixed_params$min_child_weight,
+      subsample = fixed_params$subsample,
+      colsample_bytree = fixed_params$colsample_bytree,
+      objective = fixed_params$objective,
+      eval_metric = fixed_params$eval_metric,
+      num_class = fixed_params$num_class,
+      gamma = param_grid$gamma[i]  # Dynamically set gamma
+    )
+    
+    # Perform cross-validation
+    cv <- xgb.cv(
+      params = current_params,
+      data = dtrain,
+      nrounds = nrounds,
+      nfold = nfold,
+      early_stopping_rounds = early_stopping_rounds,
+      maximize = FALSE,
+      verbose = 0
+    )
+    
+    mean_logloss <- min(cv$evaluation_log$test_mlogloss_mean)
+    logloss_results <- rbind(logloss_results, data.frame(gamma = param_grid$gamma[i], logloss = mean_logloss))
+    
+    if (mean_logloss < best_logloss) {
+      best_logloss <- mean_logloss
+      best_params <- current_params
+      cat(sprintf("New best logloss found: %.4f (gamma = %.2f)\n", best_logloss, param_grid$gamma[i]))
+    }
+  }
+  
+  list(best_params = best_params, best_logloss = best_logloss, logloss_results = logloss_results)
+}
+
+# Run the optimization for `gamma`
+result_step3 <- result_step3(param_grid_step3, fixed_params, xgb_train, nrounds = nrounds)
+
+# Extract results for plotting
+logloss_results <- result_step3$logloss_results
+best_gamma <- result_step3$best_params$gamma
+best_logloss <- result_step3$best_logloss
+
+# Update the parameters with the best found value
+cat(sprintf("\nBest parameter: gamma = %.2f, Logloss: %.4f\n", best_gamma, best_logloss))
+
+fixed_params$gamma <- best_gamma
+
+# Plot the results
+ggplot(logloss_results, aes(x = gamma, y = logloss)) +
+  geom_line(color = "blue", size = 1) +  # Line plot for log-loss
+  geom_point(color = "blue", size = 3) +  # Points for each gamma value
+  geom_vline(xintercept = best_gamma, color = "red", linetype = "dashed", size = 1) +  # Highlight best gamma
+  annotate("text", x = best_gamma, y = best_logloss, 
+           label = paste("Best: gamma =", best_gamma), 
+           vjust = -1, hjust = -0.1, color = "red", size = 4) +  # Label for best gamma
+  labs(
+    title = "Logloss vs. Gamma",
+    x = "Gamma",
+    y = "Logloss"
+  ) +
+  theme_minimal()
+```
+
+### Step 4: randomness (`subsample`, `colsample_bytree`)
+
+```{r}
+fixed_params
+```
+
+```{r}
+set.seed(
+  1234
+)
+param_grid_step4 <- expand.grid(subsample = c(0.5, 0.8, 0.9, 1), colsample_bytree = c(0.5, 0.8, 0.9, 1))
+set.seed(1234)
+result_step4 <- function(param_grid, fixed_params, dtrain, nfold = 5, early_stopping_rounds = 10, nrounds) {
+  best_logloss <- Inf
+  best_params <- NULL
+  logloss_results <- data.frame(subsample = numeric(), colsample_bytree = numeric(), logloss = numeric())
+
+  for (i in 1:nrow(param_grid)) {
+    cat(sprintf("Iteration %d of %d: Testing subsample = %.1f, colsample_bytree = %.1f\n", 
+                i, nrow(param_grid), param_grid$subsample[i], param_grid$colsample_bytree[i]))
+    
+    # Combine fixed params with the current grid search params
+    current_params <- list(
+      booster = fixed_params$booster,
+      eta = fixed_params$eta,
+      max_depth = fixed_params$max_depth,
+      min_child_weight = fixed_params$min_child_weight,
+      gamma = fixed_params$gamma,
+      objective = fixed_params$objective,
+      eval_metric = fixed_params$eval_metric,
+      num_class = fixed_params$num_class,
+      subsample = param_grid$subsample[i],                # Dynamically set subsample
+      colsample_bytree = param_grid$colsample_bytree[i]   # Dynamically set colsample_bytree
+    )
+    
+    # Perform cross-validation
+    cv <- xgb.cv(
+      params = current_params,
+      data = dtrain,
+      nrounds = nrounds,
+      nfold = nfold,
+      early_stopping_rounds = early_stopping_rounds,
+      maximize = FALSE,
+      verbose = 0
+    )
+    
+    mean_logloss <- min(cv$evaluation_log$test_mlogloss_mean)
+    logloss_results <- rbind(logloss_results, 
+                             data.frame(subsample = param_grid$subsample[i], 
+                                        colsample_bytree = param_grid$colsample_bytree[i], 
+                                        logloss = mean_logloss))
+    
+    if (mean_logloss < best_logloss) {
+      best_logloss <- mean_logloss
+      best_params <- current_params
+      cat(sprintf("New best logloss found: %.4f (subsample = %.1f, colsample_bytree = %.1f)\n", 
+                  best_logloss, param_grid$subsample[i], param_grid$colsample_bytree[i]))
+    }
+  }
+  
+  list(best_params = best_params, best_logloss = best_logloss, logloss_results = logloss_results)
+}
+set.seed(1234)
+# Run the updated optimization for `subsample` and `colsample_bytree`
+result_step4 <- result_step4(param_grid_step4, fixed_params, xgb_train, nrounds = nrounds)
+
+# Extract results for plotting
+logloss_results <- result_step4$logloss_results
+logloss_results$combination <- paste(logloss_results$subsample, logloss_results$colsample_bytree, sep = "-")
+
+best_subsample <- result_step4$best_params$subsample
+best_colsample_bytree <- result_step4$best_params$colsample_bytree
+best_logloss <- result_step4$best_logloss
+
+# Update the parameters with the best found values
+cat(sprintf("\nBest parameters: subsample = %.1f, colsample_bytree = %.1f, Logloss: %.4f\n", 
+            best_subsample, best_colsample_bytree, best_logloss))
+
+fixed_params$subsample <- best_subsample
+fixed_params$colsample_bytree <- best_colsample_bytree
+
+# Plot the results as a line plot
+
+ggplot(logloss_results, aes(x = combination, y = logloss, group = 1)) +
+  geom_line(color = "blue", size = 1) +  # Line plot for log-loss
+  geom_point(color = "blue", size = 3) +  # Points for each combination
+  geom_vline(xintercept = which.min(logloss_results$logloss), color = "red", linetype = "dashed", size = 1) +  # Highlight best combination
+  annotate("text", x = which.min(logloss_results$logloss), y = best_logloss, 
+           label = paste("Best:   ", best_subsample, best_colsample_bytree), 
+           vjust = -1, color = "red", size = 4) +  # Label for best combination
+  labs(
+    title = "Logloss vs. Parameter Combination",
+    x = "Combination (subsample ; colsample_bytree)",
+    y = "Logloss"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Same plot, with the combinations as an ordered factor.
+
+```{r}
+logloss_results$combination <- factor(logloss_results$combination, levels = logloss_results$combination)
+
+# Get the best combination for the dashed line
+best_combination <- logloss_results$combination[which.min(logloss_results$logloss)]
+
+# Plot the results
+ggplot(logloss_results, aes(x = combination, y = logloss, group = 1)) +
+  geom_line(color = "blue", size = 1) +  # Line plot for log-loss
+  geom_point(color = "blue", size = 3) +  # Points for each combination
+  geom_vline(xintercept = as.numeric(best_combination), color = "red", linetype = "dashed", size = 1) +  # Highlight best combination
+  annotate("text", x = as.numeric(best_combination), y = best_logloss, 
+           label = paste("Best:", best_subsample, best_colsample_bytree), 
+           vjust = -1, color = "red", size = 4) +  # Label for best combination
+  labs(
+    title = "Logloss vs. Parameter Combination",
+    x = "Combination (subsample ; colsample_bytree)",
+    y = "Logloss"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+fixed_params
+```
+
+### Step 5: regularization (`alpha`, `lambda`)
+
+Make the model more conservative with L1 (`alpha`) and L2 (`lambda`) regularization.
+
+```{r}
+param_grid_step5 <- expand.grid(alpha = c(0, 0.5, 1), lambda = c(1, 1.5, 2))
+set.seed(1234)
+result_step5 <- function(param_grid, fixed_params, dtrain, nfold = 5, early_stopping_rounds = 10, nrounds) {
+  best_logloss <- Inf
+  best_params <- list()
+  logloss_results <- data.frame(alpha = numeric(), lambda = numeric(), logloss = numeric())
+  
+  for (i in 1:nrow(param_grid)) {
+    cat(sprintf("Iteration %d of %d: Testing alpha = %.1f, lambda = %.1f\n", 
+                i, nrow(param_grid), param_grid$alpha[i], param_grid$lambda[i]))
+    
+    # Combine fixed params with the current grid search params
+    current_params <- c(
+      fixed_params,
+      list(
+        alpha = param_grid$alpha[i],   # Dynamically set alpha
+        lambda = param_grid$lambda[i] # Dynamically set lambda
+      )
+    )
+    
+    # Perform cross-validation
+    cv <- xgb.cv(
+      params = current_params,
+      data = dtrain,
+      nrounds = nrounds,
+      nfold = nfold,
+      early_stopping_rounds = early_stopping_rounds,
+      maximize = FALSE,
+      verbose = 0
+    )
+    
+    mean_logloss <- min(cv$evaluation_log$test_mlogloss_mean)
+    logloss_results <- rbind(logloss_results, 
+                             data.frame(alpha = param_grid$alpha[i], 
+                                        lambda = param_grid$lambda[i], 
+                                        logloss = mean_logloss))
+    
+    # Ensure the best_logloss and corresponding parameters are stored
+    if (mean_logloss < best_logloss) {
+      best_logloss <- mean_logloss
+      best_params <- list(alpha = param_grid$alpha[i], lambda = param_grid$lambda[i])
+      cat(sprintf("New best logloss found: %.4f (alpha = %.1f, lambda = %.1f)\n", 
+                  best_logloss, param_grid$alpha[i], param_grid$lambda[i]))
+    }
+  }
+  
+  list(best_params = best_params, best_logloss = best_logloss, logloss_results = logloss_results)
+}
+
+# Run the optimization for `alpha` and `lambda`
+result_step5 <- result_step5(param_grid_step5, fixed_params, xgb_train, nrounds = nrounds)
+
+# Extract results for plotting
+logloss_results <- result_step5$logloss_results
+logloss_results$combination <- paste(logloss_results$alpha, logloss_results$lambda, sep = "-")
+
+best_alpha <- result_step5$best_params$alpha
+best_lambda <- result_step5$best_params$lambda
+best_logloss <- result_step5$best_logloss
+
+# Update the parameters with the best found values
+cat(sprintf("\nBest parameters: alpha = %.1f, lambda = %.1f, Logloss: %.4f\n", 
+            best_alpha, best_lambda, best_logloss))
+
+fixed_params$alpha <- best_alpha
+fixed_params$lambda <- best_lambda
+
+# Plot the results as a line plot
+best_combination_index <- which.min(logloss_results$logloss)
+
+ggplot(logloss_results, aes(x = combination, y = logloss, group = 1)) +
+  geom_line(color = "blue", size = 1) +  # Line plot for log-loss
+  geom_point(color = "blue", size = 3) +  # Points for each combination
+  geom_vline(xintercept = 4, color = "red", linetype = "dashed", size = 1) +  # Highlight best combination
+  annotate("text", x = 4, y = best_logloss, 
+           label = paste("Best:  ", best_alpha, ";", best_lambda), 
+           vjust = -1, color = "red", size = 4) +  # Label for best combination
+  labs(
+    title = "Logloss vs. Parameter Combination",
+    x = "Combination (alpha ; lambda)",
+    y = "Logloss"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+fixed_params
+```
+
+```{r}
+fixed_params
+```
+
+### Step 6: learning rate (`eta`)
+
+Reduce the learning rate to limit overfitting.
+
+```{r}
+# Step 6: Tune `eta`
+param_grid_step6 <- expand.grid(eta = c(0.1, 0.06, 0.01))
+
+result_step6 <- function(param_grid, fixed_params, dtrain, nfold = 5, early_stopping_rounds = 10, nrounds) {
+  best_logloss <- Inf
+  best_params <- NULL
+  logloss_results <- data.frame(eta = numeric(), logloss = numeric())
+
+  for (i in 1:nrow(param_grid)) {
+    cat(sprintf("Iteration %d of %d: Testing eta = %.3f\n", 
+                i, nrow(param_grid), param_grid$eta[i]))
+    
+    # Combine fixed params with the current grid search param
+    current_params <- c(
+      fixed_params,
+      list(eta = param_grid$eta[i])  # Dynamically set eta
+    )
+    
+    # Perform cross-validation
+    cv <- xgb.cv(
+      params = current_params,
+      data = dtrain,
+      nrounds = nrounds,
+      nfold = nfold,
+      early_stopping_rounds = early_stopping_rounds,
+      maximize = FALSE,
+      verbose = 0
+    )
+    
+    mean_logloss <- min(cv$evaluation_log$test_mlogloss_mean)
+    logloss_results <- rbind(logloss_results, 
+                             data.frame(eta = param_grid$eta[i], logloss = mean_logloss))
+    
+    if (mean_logloss < best_logloss) {
+      best_logloss <- mean_logloss
+      best_params <- list(eta = param_grid$eta[i])
+      cat(sprintf("New best logloss found: %.4f (eta = %.3f)\n", 
+                  best_logloss, param_grid$eta[i]))
+    }
+  }
+  
+  list(best_params = best_params, best_logloss = best_logloss, logloss_results = logloss_results)
+}
+
+# Run the optimization for `eta`
+result_step6 <- result_step6(param_grid_step6, fixed_params, xgb_train, nrounds = nrounds)
+
+# Extract results for plotting
+logloss_results <- result_step6$logloss_results
+
+best_eta <- result_step6$best_params$eta
+best_logloss <- result_step6$best_logloss
+
+# Update the parameters with the best found value
+cat(sprintf("\nBest parameter: eta = %.3f, Logloss: %.4f\n", 
+            best_eta, best_logloss))
+
+fixed_params$eta <- best_eta
+
+# Plot the results as a line plot
+library(ggplot2)
+ggplot(logloss_results, aes(x = eta, y = logloss)) +
+  geom_line(color = "blue", size = 1) +  # Line plot for log-loss
+  geom_point(color = "blue", size = 3) +  # Points for each eta
+  geom_vline(xintercept = best_eta, color = "red", linetype = "dashed", size = 1) +  # Highlight best eta
+  annotate("text", x = best_eta, y = best_logloss, 
+           label = paste("Best eta =", best_eta), 
+           vjust = -1, color = "red", size = 4) +  # Label for best eta
+  labs(
+    title = "Logloss vs. Learning Rate (eta)",
+    x = "Learning Rate (eta)",
+    y = "Logloss"
+  ) +
+  theme_minimal()
+
+```
+
+```{r}
+fixed_params
+```
+
+### Step 7: `max_delta_step`
+
+Tuned last because it stabilizes the optimization (useful with imbalanced classes) rather than shaping the trees.
+
+```{r}
+param_grid_step7 <- expand.grid(max_delta_step = c(0, 1, 2, 3))
+set.seed(1234)
+result_step7 <- function(param_grid, fixed_params, dtrain, nfold = 5, early_stopping_rounds = 10, nrounds) {
+  best_logloss <- Inf
+  best_params <- NULL
+  logloss_results <- data.frame(max_delta_step = numeric(), logloss = numeric())
+  
+  for (i in 1:nrow(param_grid)) {
+    cat(sprintf("Iteration %d of %d: Testing max_delta_step = %.1f\n", 
+                i, nrow(param_grid), param_grid$max_delta_step[i]))
+    
+    # Combine fixed params with the current grid search param
+    current_params <- c(
+      fixed_params,
+      list(max_delta_step = param_grid$max_delta_step[i])  # Dynamically set max_delta_step
+    )
+    
+    # Perform cross-validation
+    cv <- xgb.cv(
+      params = current_params,
+      data = dtrain,
+      nrounds = nrounds,
+      nfold = nfold,
+      early_stopping_rounds = early_stopping_rounds,
+      maximize = FALSE,
+      verbose = 0
+    )
+    
+    mean_logloss <- min(cv$evaluation_log$test_mlogloss_mean)
+    logloss_results <- rbind(logloss_results, 
+                             data.frame(max_delta_step = param_grid$max_delta_step[i], logloss = mean_logloss))
+    
+    if (mean_logloss < best_logloss) {
+      best_logloss <- mean_logloss
+      best_params <- list(max_delta_step = param_grid$max_delta_step[i])
+      cat(sprintf("New best logloss found: %.4f (max_delta_step = %.1f)\n", 
+                  best_logloss, param_grid$max_delta_step[i]))
+    }
+  }
+  
+  list(best_params = best_params, best_logloss = best_logloss, logloss_results = logloss_results)
+}
+
+# Run the optimization for `max_delta_step`
+result_step7 <- result_step7(param_grid_step7, fixed_params, xgb_train, nrounds = nrounds)
+
+# Extract results for plotting
+logloss_results <- result_step7$logloss_results
+
+best_max_delta_step <- result_step7$best_params$max_delta_step
+best_logloss <- result_step7$best_logloss
+
+# Update the parameters with the best found value
+cat(sprintf("\nBest parameter: max_delta_step = %.1f, Logloss: %.4f\n", 
+            best_max_delta_step, best_logloss))
+
+fixed_params$max_delta_step <- best_max_delta_step
+
+# Plot the results as a line plot
+library(ggplot2)
+ggplot(logloss_results, aes(x = max_delta_step, y = logloss)) +
+  geom_line(color = "blue", size = 1) +  # Line plot for log-loss
+  geom_point(color = "blue", size = 3) +  # Points for each max_delta_step
+  geom_vline(xintercept = best_max_delta_step, color = "red", linetype = "dashed", size = 1) +  # Highlight best max_delta_step
+  annotate("text", x = best_max_delta_step, y = best_logloss, 
+           label = paste("Best max_delta_step =", best_max_delta_step), 
+           vjust = -1, color = "red", size = 4) +  # Label for best max_delta_step
+  labs(
+    title = "Logloss vs. max_delta_step",
+    x = "max_delta_step",
+    y = "Logloss"
+  ) +
+  theme_minimal()
+```
+
+Final tuned parameters.
+
+```{r}
+fixed_params
+
+nrounds
+
+
+```
+
+## Final training and number of rounds
+
+Train with the tuned parameters, tracking train and validation log-loss; early stopping on the validation set refines the number of rounds.
+
+```{r}
+# Final model training with best parameters
+xgb_model <- xgb.train(
+  params = fixed_params,
+  data = xgb_train,
+  watchlist = list(train = xgb_train, eval = xgb_validation),
+  nrounds = nrounds,
+  early_stopping_rounds = 300,
+  print_every_n = 100
+)
+
+```
+
+Best number of boosting rounds and training vs validation log-loss curves.
+
+```{r}
+# Check the number of rounds used (best iteration)
+best_iteration <- xgb_model$best_iteration
+
+cat("Best number of boosting rounds:", best_iteration, "\n")
+
+# Plot training and validation log loss over iterations
+evaluation_log <- xgb_model$evaluation_log
+head(evaluation_log)
+ggplot(data = evaluation_log, aes(x = iter)) +
+  geom_line(aes(y = train_mlogloss, color = "Train")) +
+  geom_line(aes(y = eval_mlogloss, color = "Validation")) +
+  labs(title = "Training vs Validation Log Loss", x = "Boosting Rounds", y = "Log Loss") +
+  scale_color_manual(name = "Dataset", values = c("Train" = "blue", "Validation" = "red")) +
+  theme_minimal()
+```
+
+Retrain with a fixed number of rounds (5953) found in the previous step.
+
+```{r}
+watchlist <- list(train = xgb_train, eval = xgb_validation)
+# train model
+set.seed(1234)
+xgb_model <- xgb.train(
+  params = fixed_params,
+  data = xgb_train,
+  watchlist = watchlist,
+  nrounds = 5953,
+  verbose = 1,
+  print_every_n = 100,
+  early_stopping_rounds = 100
+)
+xgb_model
+```
+
+Final model used for the predictions below: number of rounds found at the previous step (2356).
+
+```{r}
+# Step 3: Train the final model using the best parameters
+xgb_model <- xgb.train(
+  params = fixed_params,
+  data = xgb_train,
+  watchlist = list(train = xgb_train, eval = xgb_validation),
+  nrounds = 2356,  # Full training rounds based on CV results
+  early_stopping_rounds = 100,
+  print_every_n = 100
+)
+```
+
+## Earlier versions of the XGBoost training (not run)
+
+The chunks in this section are disabled (`eval=FALSE`): previous parameter sets and training attempts, kept for reference.
+
+```{r, eval=FALSE}
+xgb_params <- list(
+  booster = "gbtree",
+  eta = 0.025,  # 0.001
+  max_depth = 3,
+  min_child_weight = 1,
+  gamma = 1.25 ,
+  subsample = 0.9,             # subsample ratio of the training data.
+  colsample_bytree = 0.8,
+  max_delta_step= 0.75,
+  alpha = 0.5,
+  lambda = 1,
+  objective = "multi:softprob",
+  eval_metric = "mlogloss",
+  num_class = length(levels(as.factor(data_new$Target)))
+  
+  # Add scale_pos_weight for class imbalance
+  # scale_pos_weight = c(dropout_weight, enrolled_weight, graduate_weight)
+)
+length(levels(as.factor(data_new$Target)))
+# Watchlist to track training and validation errors
+watchlist <- list(train = xgb_train, eval = xgb_validation)
+```
+
+```{r, eval=FALSE}
+# train model
+set.seed(1234)
+watchlist <- list(train = xgb_train, eval = xgb_validation)
+xgb_model <- xgb.train(
+  params = fixed_params,
+  data = xgb_train,
+  watchlist = watchlist,
+  nrounds = 100,  # 13000
+  verbose = 1,
+  print_every_n = 500,
+  early_stopping_rounds = 100
+)
+xgb_model
+```
+
+```{r, eval=FALSE}
+best_iteration <- xgb_model$best_iteration
+
+cat("Best number of boosting rounds:", best_iteration, "\n")
+
+ggplot(data = evaluation_log, aes(x = iter)) +
+  geom_line(aes(y = train_mlogloss, color = "Train"), size = 0.8) +  # Training line
+  geom_line(aes(y = eval_mlogloss, color = "Validation"), size = 0.8, linetype = "dashed") +  # Validation dashed line
+  geom_vline(xintercept = best_iteration, color = "purple", linetype = "dashed", size = 0.8) +  # Highlight best iteration
+  labs(
+    title = "Training vs Validation Log Loss",
+    subtitle = paste("Optimal number of boosting rounds:", best_iteration),
+    x = "Boosting Rounds",
+    y = "Log Loss"
+  ) +
+  scale_color_manual(
+    name = "Dataset",
+    values = c("Train" = "#1E88E5", "Validation" = "#D81B60")  # Updated colors
+  ) +
+  theme_minimal(base_size = 15) +  # Clean theme with readable font size
+  theme(
+    legend.position = "bottom",  # Move legend to the bottom
+    plot.title = element_text(hjust = 0.5, face = "bold"),  # Center-aligned bold title
+    plot.subtitle = element_text(hjust = 0.5, size = 12),  # Centered subtitle
+    axis.text = element_text(size = 12),  # Larger axis text
+    axis.title = element_text(size = 14),  # Larger axis titles
+    panel.grid.minor = element_blank(),  # Remove minor grid lines
+    plot.margin = unit(c(0.25, 0.25, 0.5, 0.25), "cm")  # Properly set margins with unit()
+  )
+```
+
+```{r, eval=FALSE}
+# train model
+set.seed(1234)
+xgb_model <- xgb.train(
+  params = fixed_params,
+  data = xgb_train,
+  watchlist = watchlist,
+  nrounds = 2337,
+  verbose = 1,
+  print_every_n = 100,
+  early_stopping_rounds = 100
+)
+xgb_model
+```
+
+Another attempt: very low learning rate and accuracy-based metric (`merror`).
+
+```{r, eval=FALSE}
+xgb_params <- list(
+  booster = "gbtree",
+  eta = 0.001,
+  max_depth = 4,
+  gamma = 6,
+  subsample = 0.7,
+  colsample_bytree = 0.8,
+  alpha = 0.5,
+  lambda = 1,
+  objective = "multi:softprob",
+  eval_metric =  "merror",  # Track both log loss and error
+  num_class = length(levels(as.factor(data_new$Target))),
+  scale_pos_weight = c(dropout_weight, enrolled_weight, graduate_weight)
+)
+```
+
+```{r, eval=FALSE}
+xgb_model <- xgb.train(
+  params = xgb_params,
+  data = xgb_train,
+  watchlist = watchlist,
+  nrounds = 12000,
+  verbose = 1,
+  print_every_n = 100,
+  early_stopping_rounds = 200
+)
+```
+
+```{r, eval=FALSE}
+# Best number of boosting rounds
+best_iteration <- xgb_model$best_iteration
+cat("Best number of boosting rounds:", best_iteration, "\n")
+
+# Extract the evaluation log and calculate accuracy
+evaluation_log <- xgb_model$evaluation_log
+evaluation_log <- evaluation_log %>%
+  mutate(train_accuracy = 1 - train_merror,    # Calculate training accuracy
+         eval_accuracy = 1 - eval_merror)      # Calculate validation accuracy
+
+# Plot training and validation accuracy over boosting rounds
+ggplot(data = evaluation_log, aes(x = iter)) +
+  geom_line(aes(y = train_accuracy, color = "Train"), size = 0.8) +  # Thicker line for training accuracy
+  geom_line(aes(y = eval_accuracy, color = "Validation"), size = 0.8, linetype = "dashed") +  # Thicker dashed line for validation accuracy
+  labs(title = "Training vs Validation Accuracy", 
+       x = "Boosting Rounds", 
+       y = "Accuracy",
+       subtitle = paste("Best number of boosting rounds:", best_iteration)) +
+  scale_color_manual(name = "Dataset", 
+                     values = c("Train" = "#1f78b4", "Validation" = "#e31a1c")) +  # Custom colors
+  theme_minimal(base_size = 14) +  # Larger base font size for readability
+  theme(legend.position = "bottom",  # Place the legend at the bottom
+        plot.title = element_text(hjust = 0.5, face = "bold"),  # Centered and bold title
+        plot.subtitle = element_text(hjust = 0.5),  # Centered subtitle
+        axis.text = element_text(size = 12),  # Larger axis text
+        axis.title = element_text(size = 14)) +
+  ylim(0.4, 1)  # Set y-axis to start at 0.4 and go to 1 for accuracy
+```
+
+## XGBoost predictions
+
+Predictions on the validation set: class probabilities, predicted class (highest probability) and accuracy.
+
+```{r}
+xgb_preds <- predict(xgb_model, as.matrix(X_validation), reshape = TRUE)
+xgb_preds <- as.data.frame(xgb_preds)
+data_new$Target <- as.factor(data_new$Target)
+
+levels(data_new$Target)
+
+colnames(xgb_preds) <- levels(data_new$Target)
+# head(xgb_preds)
+####################################################
+xgb_preds$PredictedClass <- apply(xgb_preds, 1, function(y) colnames(xgb_preds)[which.max(y)])
+xgb_preds$ActualClass <- levels(data_new$Target)[y_validation + 1]
+# xgb_preds
+# head(xgb_preds)
+accuracy <- sum(xgb_preds$PredictedClass == xgb_preds$ActualClass) / nrow(xgb_preds)
+accuracy
+
+# NOTE: here the arguments are in (actual, predicted) order; the test-set chunk below uses (predicted, actual)
+confusionMatrix(factor(xgb_preds$ActualClass), factor(xgb_preds$PredictedClass))
+```
+
+Same procedure on the test set.
+
+```{r}
+xgb_preds_test <- predict(xgb_model, as.matrix(X_test), reshape = TRUE)
+xgb_preds_test <- as.data.frame(xgb_preds_test)
+
+data_new$Target <- as.factor(data_new$Target)
+
+levels(data_new$Target)
+
+colnames(xgb_preds_test) <- levels(data_new$Target)
+# head(xgb_preds)
+
+####################################################
+xgb_preds_test$PredictedClass <- apply(xgb_preds_test, 1, function(y) colnames(xgb_preds_test)[which.max(y)])
+xgb_preds_test$ActualClass <- levels(data_new$Target)[y_test + 1]
+# xgb_preds_test
+
+# head(xgb_preds_test)
+accuracy <- sum(xgb_preds_test$PredictedClass == xgb_preds_test$ActualClass) / nrow(xgb_preds_test)
+accuracy
+
+
+confusionMatrix(factor(xgb_preds_test$ActualClass), factor(xgb_preds_test$PredictedClass))
+```
+
+Confusion matrix on the test set (predicted vs actual) and normalized plot.
+
+```{r}
+confusion_matrix_xgb <- confusionMatrix(factor(xgb_preds_test$PredictedClass), factor(xgb_preds_test$ActualClass))
+print(confusion_matrix_xgb)
+
+# Convert the confusion matrix to a data frame
+cf_xgb_df <- as.data.frame(as.table(confusion_matrix_xgb))
+colnames(cf_xgb_df) <- c("Predicted", "Actual", "Count")
+
+# Sum for the actual labels
+sums <- tapply(cf_xgb_df$Count, cf_xgb_df$Actual, sum)
+
+# Percentages
+cf_xgb_df$Percentage <- cf_xgb_df$Count / sums[cf_xgb_df$Actual] * 100
+
+# Display the normalized confusion matrix with ggplot
+ggplot(cf_xgb_df, aes(x = Actual, y = Predicted, fill = Percentage)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = paste0(round(Percentage, 1), "%")), size = 3) +
+  scale_fill_gradient(low = "white", high = "lightpink") +
+  theme_minimal() +
+  labs(x = "Actual", y = "Predicted", title = "Normalized Confusion Matrix")
+
+```
+
+## XGBoost variable importance
+
+Variable importance (built-in plot, top 10).
+
+```{r}
+# Compute variable importance
+importance_matrix <- xgb.importance(feature_names = colnames(xgb_train), model = xgb_model)
+
+# Plot variable importance
+xgb.plot.importance(importance_matrix, top_n = 10, col = rainbow(10))  # top_n sets the number of variables to show
+```
+
+Top 10 features by Cover.
+
+```{r}
+# Convert importance matrix to a data frame
+importance_df <- as.data.frame(importance_matrix)
+
+# Sort by Cover (Gini importance) in descending order
+importance_df <- importance_df[order(-importance_df$Cover), ]
+
+# Create the plot for the top 10 features
+ggplot(importance_df[1:10, ], aes(x = reorder(Feature, Cover), y = Cover, fill = Cover)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_gradient(low = "lightblue", high = "darkblue") +  # Green gradient for Gini
+  labs(title = "Top 10 Features by Gini Importance (Cover)", x = "Features", y = "Importance (Cover)") +
+  theme_minimal()
+```
+
+5 least important features by Cover.
+
+```{r}
+importance_matrix <- xgb.importance(feature_names = colnames(xgb_train), model = xgb_model)
+
+# Convert to a data frame
+importance_df <- as.data.frame(importance_matrix)
+
+# Sort the variables by Cover (Gini-based importance) in ascending order
+least_important <- importance_df[order(importance_df$Cover), ][1:5, ]
+
+# Create the plot for the 5 least important variables
+ggplot(least_important, aes(x = reorder(Feature, Cover), y = Cover, fill = Cover)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_gradient(low = "lightgreen", high = "darkgreen") +  # Blue color scheme
+  labs(title = "Least Important Features by Gini Importance (Cover))", x = "Features", y = "Importance (Cover)") +
+  theme_minimal()
+```
+
+```{r}
+importance_df
+```

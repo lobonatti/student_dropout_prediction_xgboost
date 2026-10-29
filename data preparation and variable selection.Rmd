@@ -1,0 +1,194 @@
+---
+title: "Thesis code (1/2): data preparation and variable selection"
+author: "bonatti lorenzo"
+date: "2024-10-30"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Prepares the *Student's Dropout and Academic Success* dataset (4424 students, 36 variables + `Target`: Dropout / Enrolled / Graduate).
+Output: train / validation / test sets (60/20/20) saved in `data/prepared_data.rds`, used by `02_models.Rmd`.
+References to chapters point to the thesis PDF (Chapter 6.3 for variable selection, 7.1 for the split).
+
+```{r}
+library(dplyr)
+```
+
+# Data
+
+Load the dataset (semicolon-separated CSV).
+
+```{r}
+# NOTE: replace with the path to the dataset on your machine
+data <- read.csv("data/data.csv", sep = ";", header = T)
+```
+
+# Variable selection and feature engineering
+
+Merge the highly correlated 1st- and 2nd-semester variables (credited, enrolled, approved; |corr| > 0.85) into three yearly totals, then drop the original six.
+
+```{r}
+data$tot_units_credited <- rowSums(data[,c(22, 28)], na.rm = TRUE)
+data$tot_units_enrolled <- rowSums(data[,c(23, 29)], na.rm = TRUE)
+# data$tot_units_evaluation <- rowSums(data[,c(24, 30)], na.rm = TRUE)
+data$tot_num_units_approved <- rowSums(data[,c(25, 31)], na.rm = TRUE)
+# data$tot_year_grade <- rowMeans(data[,c(26, 32)], na.rm = TRUE)
+# data$tot_units_no_eval <- rowSums(data[,c(27, 33)], na.rm = TRUE)
+data_new <- data[,-c(22, 23, 25, 28, 29, 31)]
+```
+
+Drop variables that are not informative according to the boxplots (macroeconomic variables, units without evaluation, total units credited).
+
+```{r}
+data_new <- data_new[,-c(32,24,27,28,29,30)]
+```
+
+# Categorical variables with many levels
+
+Count the levels of the parents' qualification and occupation variables.
+
+```{r}
+length(levels(as.factor(data_new$Mother.s.qualification)))
+length(levels(as.factor(data_new$Father.s.qualification)))
+length(levels(as.factor(data_new$Mother.s.occupation)))
+length(levels(as.factor(data_new$Father.s.occupation)))
+```
+
+Merge rare levels into a single level "Altro" ("Other") and drop unused levels.
+Father's variables: levels with at most 2 observations are merged. Mother's variables: the threshold is `< 1`, so no level is merged.
+
+```{r}
+rare_levels <- names(which(table(data_new$Father.s.occupation) <= 2))
+
+# Step 2: Merge rare levels into a single level called "Altro" ("Other")
+data_new$Father.s.occupation <- factor(ifelse(data_new$Father.s.occupation %in% rare_levels, 
+                                           "Altro", 
+                                           as.character(data_new$Father.s.occupation)))
+
+# Step 3: Remove unused levels
+data_new$Father.s.occupation <- droplevels(data_new$Father.s.occupation)
+rare_levels <- names(which(table(data_new$Mother.s.occupation) < 1))
+
+# Step 2: Merge rare levels into a single level called "Altro" ("Other")
+data_new$Mother.s.occupation <- factor(ifelse(data_new$Mother.s.occupation %in% rare_levels, 
+                                           "Altro", 
+                                           as.character(data_new$Mother.s.occupation)))
+
+# Step 3: Remove unused levels
+data_new$Mother.s.occupation <- droplevels(data_new$Mother.s.occupation)
+
+rare_levels <- names(which(table(data_new$Father.s.qualification) <= 2))
+
+# Step 2: Merge rare levels into a single level called "Altro" ("Other")
+data_new$Father.s.qualification <- factor(ifelse(data_new$Father.s.qualification %in% rare_levels, 
+                                           "Altro", 
+                                           as.character(data_new$Father.s.qualification)))
+
+# Step 3: Remove unused levels
+data_new$Father.s.qualification <- droplevels(data_new$Father.s.qualification)
+
+rare_levels <- names(which(table(data_new$Mother.s.qualification) < 1))
+
+# Step 2: Merge rare levels into a single level called "Altro" ("Other")
+data_new$Mother.s.qualification <- factor(ifelse(data_new$Mother.s.qualification %in% rare_levels, 
+                                           "Altro", 
+                                           as.character(data_new$Mother.s.qualification)))
+
+# Step 3: Remove unused levels
+data_new$Mother.s.qualification <- droplevels(data_new$Mother.s.qualification)
+```
+
+Check the number of levels again after merging.
+
+```{r}
+length(levels(as.factor(data_new$Mother.s.qualification)))
+length(levels(as.factor(data_new$Father.s.qualification)))
+length(levels(as.factor(data_new$Mother.s.occupation)))
+length(levels(as.factor(data_new$Father.s.occupation)))
+```
+
+Split numerical and categorical variables, then put the numerical ones first.
+The final dataset has 27 predictors; `Target` is the last column.
+
+```{r}
+data_numerical <- data_new[,c(7,13,20,22,23,24,25,27,28)]
+data_categorical <- data_new[,- c(7,13,20,22,23,24,25,27,28)]
+#data_numerical <- scale(data_numerical)
+data_new <- cbind(data_numerical, data_categorical) # the target is the last column
+```
+
+# Optional: pre-enrollment dataset (Chapter 9)
+
+Keep only information available at enrollment (drops the academic performance variables and "Tuition fees up to date", which are only known after the start of university).
+Disabled by default: set `eval=TRUE` to build the pre-enrollment dataset, and change the output file name in the last chunk to avoid overwriting the full dataset.
+
+```{r, eval=FALSE}
+data_new <- data_new[,-c(4,5,6,7,8,9,24)]
+# "Tuition fees up to date" must also be removed: it is only known after the start of university.
+```
+
+# Train / validation / test split
+
+Split into train (60%), validation (20%) and test (20%) sets.
+
+```{r}
+data_new$Target=as.factor(data_new$Target)
+
+n=nrow(data_new)
+
+set.seed(1234)
+
+# test set (20% of the data)
+select_test = sample(1:n, n * 0.2)
+test = as.data.frame(data_new[select_test,])
+
+# Remaining data after removing the test set
+remaining_data = data_new[-select_test,]
+n_remaining = nrow(remaining_data)
+
+# validation set (about 20% of the total data)
+select_validation = sample(1:n_remaining, n_remaining * 0.24971)
+validation = as.data.frame(remaining_data[select_validation,])
+
+# Train set (remaining 60%)
+train = as.data.frame(remaining_data[-select_validation,])
+
+cat("Training set dimensions: ", dim(train), "\n")
+cat("Validation set dimensions: ", dim(validation), "\n")
+cat("Test set dimensions: ", dim(test), "\n")
+```
+
+Save the prepared data for `02_models.Rmd`.
+
+```{r}
+dir.create("data", showWarnings = FALSE)
+saveRDS(list(data_new = data_new, train = train, validation = validation, test = test),
+        "data/prepared_data.rds")
+```
+
+# Appendix: exploratory experiments (not used in the final models)
+
+Attempt to fix class imbalance: oversample every class up to the size of the largest one (bootstrap with replacement).
+The result (`data_balanced`) was not used for the final models, which use the original 4424 observations.
+
+```{r, eval=FALSE}
+# Assume the dataset is called "data" and the target variable is "Target"
+table(data$Target)  # Check the initial class distribution
+
+# Number of observations of the most represented class (Graduate)
+n_max <- max(table(data$Target))
+
+# Apply the bootstrap to generate more examples of the less represented classes
+set.seed(123)  # For reproducibility
+
+data_balanced <- data_new %>%
+  group_by(Target) %>%
+  sample_n(n_max, replace = TRUE) %>%  
+  ungroup()
+
+# Check the new class distribution
+table(data_balanced$Target)
+```
